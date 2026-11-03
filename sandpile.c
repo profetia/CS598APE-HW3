@@ -20,6 +20,8 @@ static void die(const char *s) {
 
 int N = 801;
 int **grid;
+int *row_begin;
+int *row_end;
 
 // you can also use this function to debug print your sandpile
 static void render(char *filename) {
@@ -77,25 +79,41 @@ static void stabilize() {
   do {
     changed = 0;
     for (int i = 0; i < N; ++i) {
-      for (int j = 0; j <= MAX(i, N - 1 - i); ++j) {
-        if ((i - N / 2) * (i - N / 2) + (j - N / 2) * (j - N / 2) <=
-            (N / 2) * (N / 2)) {
-          if (grid[i][j] < 4)
-            continue;
-          changed = 1; // topple it
-          grid[i][j] -= 4;
-          if (i > 0)
-            grid[i - 1][j]++;
-          if (j > 0)
-            grid[i][j - 1]++;
-          if (i < N - 1)
-            grid[i + 1][j]++;
-          if (j < N - 1)
-            grid[i][j + 1]++;
-        }
+      for (int j = row_begin[i]; j < row_end[i]; ++j) {
+        if (grid[i][j] < 4)
+          continue;
+        changed = 1; // topple it
+        grid[i][j] -= 4;
+        if (i > 0)
+          grid[i - 1][j]++;
+        if (j > 0)
+          grid[i][j - 1]++;
+        if (i < N - 1)
+          grid[i + 1][j]++;
+        if (j < N - 1)
+          grid[i][j + 1]++;
       }
     }
   } while (changed);
+}
+
+static void init_row_bounds() {
+  int center = N / 2;
+  int radius_squared = center * center;
+  for (int i = 0; i < N; ++i) {
+    int max_j = MAX(i, N - 1 - i);
+    int vertical = i - center;
+    row_begin[i] = max_j + 1;
+    row_end[i] = max_j + 1;
+    for (int j = 0; j <= max_j; ++j) {
+      int horizontal = j - center;
+      if (vertical * vertical + horizontal * horizontal <= radius_squared) {
+        if (row_begin[i] > max_j)
+          row_begin[i] = j;
+        row_end[i] = j + 1;
+      }
+    }
+  }
 }
 
 void find_identity() {
@@ -126,9 +144,12 @@ int main(int argc, char **argv) {
   N = (int)parsed;
 
   grid = (int **)malloc(N * sizeof(int *));
+  row_begin = (int *)malloc(N * sizeof(int));
+  row_end = (int *)malloc(N * sizeof(int));
   for (int i = 0; i < N; ++i) {
     grid[i] = (int *)malloc(N * sizeof(int));
   }
+  init_row_bounds();
 
   find_identity();
 
@@ -137,5 +158,7 @@ int main(int argc, char **argv) {
     free(grid[i]);
   }
   free(grid);
+  free(row_begin);
+  free(row_end);
   return EXIT_SUCCESS;
 }
