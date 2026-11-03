@@ -102,6 +102,8 @@ static void stabilize() {
     shared_row[row] = 1;
   }
   for (int i = 0; i < N; ++i) {
+    if (i == 0 || i == N - 1 || row_begin[i] == 0 || row_end[i] == N)
+      special_row[i] = 1;
     if (shared_row[i]) {
       special_row[i] = 1;
       if (i > 0)
@@ -126,14 +128,10 @@ static void stabilize() {
               continue;
             local_changed = 1;
             grid[i][j] -= 4;
-            if (i > 0)
-              grid[i - 1][j]++;
-            if (j > 0)
-              grid[i][j - 1]++;
-            if (i < N - 1)
-              grid[i + 1][j]++;
-            if (j < N - 1)
-              grid[i][j + 1]++;
+            grid[i - 1][j]++;
+            grid[i][j - 1]++;
+            grid[i + 1][j]++;
+            grid[i][j + 1]++;
           }
           continue;
         }
