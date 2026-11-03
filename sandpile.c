@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <immintrin.h>
 #include <inttypes.h>
 #include <math.h>
 #include <omp.h>
@@ -123,15 +124,40 @@ static void stabilize() {
       int local_changed = 0;
       for (int i = begin; i < end; ++i) {
         if (!special_row[i]) {
-          for (int j = row_begin[i]; j < row_end[i]; ++j) {
-            if (grid[i][j] < 4)
+          int first = row_begin[i];
+          int last = row_end[i];
+          int j = first & ~15;
+          int vector_end = (last + 15) & ~15;
+          __m512i one = _mm512_set1_epi32(1);
+          __m512i three = _mm512_set1_epi32(3);
+          __m512i four = _mm512_set1_epi32(4);
+          for (; j < vector_end; j += 16) {
+            __mmask16 valid = 0xffff;
+            if (j < first)
+              valid &= (__mmask16)(0xffffu << (first - j));
+            if (j + 16 > last)
+              valid &= (__mmask16)(0xffffu >> (j + 16 - last));
+            __m512i value = _mm512_load_si512((__m512i *)&grid[i][j]);
+            __mmask16 mask = _mm512_cmpgt_epi32_mask(value, three) & valid;
+            if (!mask)
               continue;
             local_changed = 1;
-            grid[i][j] -= 4;
-            grid[i - 1][j]++;
-            grid[i][j - 1]++;
-            grid[i + 1][j]++;
-            grid[i][j + 1]++;
+            __mmask16 from_left = (__mmask16)(mask << 1);
+            __mmask16 from_right = mask >> 1;
+            value = _mm512_mask_sub_epi32(value, mask, value, four);
+            value = _mm512_mask_add_epi32(value, from_left, value, one);
+            value = _mm512_mask_add_epi32(value, from_right, value, one);
+            _mm512_store_si512((__m512i *)&grid[i][j], value);
+            value = _mm512_load_si512((__m512i *)&grid[i - 1][j]);
+            _mm512_store_si512((__m512i *)&grid[i - 1][j],
+                               _mm512_mask_add_epi32(value, mask, value, one));
+            value = _mm512_load_si512((__m512i *)&grid[i + 1][j]);
+            _mm512_store_si512((__m512i *)&grid[i + 1][j],
+                               _mm512_mask_add_epi32(value, mask, value, one));
+            if (mask & 1)
+              grid[i][j - 1]++;
+            if (mask & 0x8000)
+              grid[i][j + 16]++;
           }
           continue;
         }
@@ -253,8 +279,10 @@ int main(int argc, char **argv) {
   grid = (int **)malloc(N * sizeof(int *));
   row_begin = (int *)malloc(N * sizeof(int));
   row_end = (int *)malloc(N * sizeof(int));
+  size_t row_bytes = ((size_t)(N + 15) * sizeof(int) + 63) & ~(size_t)63;
   for (int i = 0; i < N; ++i) {
-    grid[i] = (int *)malloc(N * sizeof(int));
+    grid[i] = (int *)aligned_alloc(64, row_bytes);
+    memset(grid[i], 0, row_bytes);
   }
   init_row_bounds();
 
