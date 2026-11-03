@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <math.h>
+#include <omp.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,26 +76,119 @@ static void render(char *filename) {
 }
 
 static void stabilize() {
-  int changed = 0;
-  do {
-    changed = 0;
-    for (int i = 0; i < N; ++i) {
-      for (int j = row_begin[i]; j < row_end[i]; ++j) {
-        if (grid[i][j] < 4)
-          continue;
-        changed = 1; // topple it
-        grid[i][j] -= 4;
-        if (i > 0)
-          grid[i - 1][j]++;
-        if (j > 0)
-          grid[i][j - 1]++;
-        if (i < N - 1)
-          grid[i + 1][j]++;
-        if (j < N - 1)
-          grid[i][j + 1]++;
-      }
+  int threads = MIN(omp_get_max_threads(), N);
+  int *shared_row = (int *)calloc(N, sizeof(int));
+  int *special_row = (int *)calloc(N, sizeof(int));
+  int *thread_changed = (int *)malloc(threads * sizeof(int));
+  if (!shared_row || !special_row || !thread_changed)
+    die("malloc failed for parallel stabilization");
+  for (int tid = 1; tid < threads; ++tid) {
+    int boundary = (int)((int64_t)N * tid / threads);
+    shared_row[boundary - 1] = 1;
+    shared_row[boundary] = 1;
+  }
+  for (int i = 0; i < N; ++i) {
+    if (shared_row[i]) {
+      special_row[i] = 1;
+      if (i > 0)
+        special_row[i - 1] = 1;
+      if (i < N - 1)
+        special_row[i + 1] = 1;
     }
-  } while (changed);
+  }
+
+  int changed = 1;
+#pragma omp parallel num_threads(threads) shared(changed)
+  {
+    int tid = omp_get_thread_num();
+    int begin = (int)((int64_t)N * tid / threads);
+    int end = (int)((int64_t)N * (tid + 1) / threads);
+    while (changed) {
+      int local_changed = 0;
+      for (int i = begin; i < end; ++i) {
+        if (!special_row[i]) {
+          for (int j = row_begin[i]; j < row_end[i]; ++j) {
+            if (grid[i][j] < 4)
+              continue;
+            local_changed = 1;
+            grid[i][j] -= 4;
+            if (i > 0)
+              grid[i - 1][j]++;
+            if (j > 0)
+              grid[i][j - 1]++;
+            if (i < N - 1)
+              grid[i + 1][j]++;
+            if (j < N - 1)
+              grid[i][j + 1]++;
+          }
+          continue;
+        }
+        for (int j = row_begin[i]; j < row_end[i]; ++j) {
+          int grains;
+          if (shared_row[i]) {
+#pragma omp atomic read
+            grains = grid[i][j];
+          } else {
+            grains = grid[i][j];
+          }
+          if (grains < 4)
+            continue;
+          local_changed = 1;
+          if (shared_row[i]) {
+#pragma omp atomic update
+            grid[i][j] -= 4;
+          } else {
+            grid[i][j] -= 4;
+          }
+          if (i > 0) {
+            if (shared_row[i - 1]) {
+#pragma omp atomic update
+              grid[i - 1][j]++;
+            } else {
+              grid[i - 1][j]++;
+            }
+          }
+          if (j > 0) {
+            if (shared_row[i]) {
+#pragma omp atomic update
+              grid[i][j - 1]++;
+            } else {
+              grid[i][j - 1]++;
+            }
+          }
+          if (i < N - 1) {
+            if (shared_row[i + 1]) {
+#pragma omp atomic update
+              grid[i + 1][j]++;
+            } else {
+              grid[i + 1][j]++;
+            }
+          }
+          if (j < N - 1) {
+            if (shared_row[i]) {
+#pragma omp atomic update
+              grid[i][j + 1]++;
+            } else {
+              grid[i][j + 1]++;
+            }
+          }
+        }
+      }
+      thread_changed[tid] = local_changed;
+#pragma omp barrier
+#pragma omp single
+      {
+        changed = 0;
+        for (int t = 0; t < threads; ++t)
+          changed |= thread_changed[t];
+      }
+#pragma omp barrier
+    }
+  }
+
+  free(shared_row);
+  free(special_row);
+  free(thread_changed);
 }
 
 static void init_row_bounds() {
