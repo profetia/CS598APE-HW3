@@ -76,8 +76,9 @@ static void render(char *filename) {
   free(pixels);
 }
 
-static void stabilize() {
-  int threads = MIN(omp_get_max_threads(), N);
+static void stabilize(int symmetric) {
+  int active_rows = symmetric ? N / 2 + 1 : N;
+  int threads = MIN(omp_get_max_threads(), active_rows);
   int *shared_row = (int *)calloc(N, sizeof(int));
   int *special_row = (int *)calloc(N, sizeof(int));
   int *thread_changed = (int *)malloc(2 * threads * sizeof(int));
@@ -86,15 +87,16 @@ static void stabilize() {
     die("malloc failed for parallel stabilization");
 
   int64_t total_cells = 0;
-  for (int i = 0; i < N; ++i)
+  for (int i = 0; i < active_rows; ++i)
     total_cells += row_end[i] - row_begin[i];
   thread_begin[0] = 0;
-  thread_begin[threads] = N;
+  thread_begin[threads] = active_rows;
   int row = 0;
   int64_t cells = 0;
   for (int tid = 1; tid < threads; ++tid) {
     int64_t target = total_cells * tid / threads;
-    while (row < N && 2 * cells + row_end[row] - row_begin[row] < 2 * target) {
+    while (row < active_rows &&
+           2 * cells + row_end[row] - row_begin[row] < 2 * target) {
       cells += row_end[row] - row_begin[row];
       ++row;
     }
@@ -102,14 +104,15 @@ static void stabilize() {
     shared_row[row - 1] = 1;
     shared_row[row] = 1;
   }
-  for (int i = 0; i < N; ++i) {
-    if (i == 0 || i == N - 1 || row_begin[i] == 0 || row_end[i] == N)
+  for (int i = 0; i < active_rows; ++i) {
+    if (i == 0 || (!symmetric && i == N - 1) || row_begin[i] == 0 ||
+        row_end[i] == N)
       special_row[i] = 1;
     if (shared_row[i]) {
       special_row[i] = 1;
       if (i > 0)
         special_row[i - 1] = 1;
-      if (i < N - 1)
+      if (i < active_rows - 1)
         special_row[i + 1] = 1;
     }
   }
@@ -129,6 +132,8 @@ static void stabilize() {
           int j = first & ~15;
           int vector_end = (last + 15) & ~15;
           __m512i one = _mm512_set1_epi32(1);
+          __m512i down =
+              _mm512_set1_epi32(symmetric && i == active_rows - 2 ? 2 : 1);
           __m512i three = _mm512_set1_epi32(3);
           __m512i four = _mm512_set1_epi32(4);
           for (; j < vector_end; j += 16) {
@@ -153,7 +158,7 @@ static void stabilize() {
                                _mm512_mask_add_epi32(value, mask, value, one));
             value = _mm512_load_si512((__m512i *)&grid[i + 1][j]);
             _mm512_store_si512((__m512i *)&grid[i + 1][j],
-                               _mm512_mask_add_epi32(value, mask, value, one));
+                               _mm512_mask_add_epi32(value, mask, value, down));
             if (mask & 1)
               grid[i][j - 1]++;
             if (mask & 0x8000)
@@ -194,12 +199,13 @@ static void stabilize() {
               grid[i][j - 1]++;
             }
           }
-          if (i < N - 1) {
+          if (i < active_rows - 1) {
+            int amount = symmetric && i == active_rows - 2 ? 2 : 1;
             if (shared_row[i + 1]) {
 #pragma omp atomic update
-              grid[i + 1][j]++;
+              grid[i + 1][j] += amount;
             } else {
-              grid[i + 1][j]++;
+              grid[i + 1][j] += amount;
             }
           }
           if (j < N - 1) {
@@ -250,18 +256,24 @@ static void init_row_bounds() {
 }
 
 void find_identity() {
-  for (int i = 0; i < N; ++i) {
+  int symmetric = N & 1;
+  int active_rows = symmetric ? N / 2 + 1 : N;
+  for (int i = 0; i < active_rows; ++i) {
     for (int j = 0; j < N; ++j) {
       grid[i][j] = 6;
     }
   }
-  stabilize();
-  for (int i = 0; i < N; ++i) {
+  stabilize(symmetric);
+  for (int i = 0; i < active_rows; ++i) {
     for (int j = 0; j < N; ++j) {
       grid[i][j] = 6 - grid[i][j];
     }
   }
-  stabilize();
+  stabilize(symmetric);
+  if (symmetric) {
+    for (int i = 0; i < N / 2; ++i)
+      memcpy(grid[N - 1 - i], grid[i], (size_t)N * sizeof(int));
+  }
 }
 
 int main(int argc, char **argv) {
