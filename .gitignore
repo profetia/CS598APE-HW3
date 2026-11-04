@@ -18,3 +18,7 @@
 
 # Compiled handouts
 /handout/*.pdf
+
+# Benchmark output
+/runs/
+__pycache__/
