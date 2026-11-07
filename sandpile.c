@@ -16,7 +16,7 @@
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 
 #ifndef DIRTY_BLOCK_ROWS
-#define DIRTY_BLOCK_ROWS 1
+#define DIRTY_BLOCK_ROWS 8
 #endif
 
 static void die(const char *s) {
