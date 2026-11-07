@@ -127,7 +127,7 @@ static void stabilize() {
           int first = row_begin[i];
           int last = row_end[i];
           int j = first;
-          for (; j < last && (j & 3); ++j) {
+          for (; j < last && (j & 7); ++j) {
             if (grid[i][j] < 4)
               continue;
             local_changed = 1;
@@ -137,33 +137,39 @@ static void stabilize() {
             grid[i + 1][j]++;
             grid[i][j + 1]++;
           }
-          __m128i one = _mm_set1_epi32(1);
-          __m128i three = _mm_set1_epi32(3);
-          __m128i four = _mm_set1_epi32(4);
-          for (; j + 4 <= last; j += 4) {
-            __m128i value = _mm_load_si128((__m128i *)&grid[i][j]);
-            __m128i topple = _mm_cmpgt_epi32(value, three);
-            int mask = _mm_movemask_ps(_mm_castsi128_ps(topple));
+          __m256i one = _mm256_set1_epi32(1);
+          __m256i three = _mm256_set1_epi32(3);
+          __m256i four = _mm256_set1_epi32(4);
+          for (; j + 8 <= last; j += 8) {
+            __m256i value = _mm256_load_si256((__m256i *)&grid[i][j]);
+            __m256i topple = _mm256_cmpgt_epi32(value, three);
+            int mask = _mm256_movemask_ps(_mm256_castsi256_ps(topple));
             if (!mask)
               continue;
             local_changed = 1;
-            value = _mm_sub_epi32(value, _mm_and_si128(topple, four));
-            value = _mm_add_epi32(
-                value, _mm_and_si128(_mm_slli_si128(topple, 4), one));
-            value = _mm_add_epi32(
-                value, _mm_and_si128(_mm_srli_si128(topple, 4), one));
-            _mm_store_si128((__m128i *)&grid[i][j], value);
-            __m128i increment = _mm_and_si128(topple, one);
-            value = _mm_load_si128((__m128i *)&grid[i - 1][j]);
-            _mm_store_si128((__m128i *)&grid[i - 1][j],
-                            _mm_add_epi32(value, increment));
-            value = _mm_load_si128((__m128i *)&grid[i + 1][j]);
-            _mm_store_si128((__m128i *)&grid[i + 1][j],
-                            _mm_add_epi32(value, increment));
+            __m256i from_left = _mm256_setr_epi32(
+                0, mask & 1, (mask >> 1) & 1, (mask >> 2) & 1,
+                (mask >> 3) & 1, (mask >> 4) & 1, (mask >> 5) & 1,
+                (mask >> 6) & 1);
+            __m256i from_right = _mm256_setr_epi32(
+                (mask >> 1) & 1, (mask >> 2) & 1, (mask >> 3) & 1,
+                (mask >> 4) & 1, (mask >> 5) & 1, (mask >> 6) & 1,
+                (mask >> 7) & 1, 0);
+            value = _mm256_sub_epi32(value, _mm256_and_si256(topple, four));
+            value = _mm256_add_epi32(value, from_left);
+            value = _mm256_add_epi32(value, from_right);
+            _mm256_store_si256((__m256i *)&grid[i][j], value);
+            __m256i increment = _mm256_and_si256(topple, one);
+            value = _mm256_load_si256((__m256i *)&grid[i - 1][j]);
+            _mm256_store_si256((__m256i *)&grid[i - 1][j],
+                               _mm256_add_epi32(value, increment));
+            value = _mm256_load_si256((__m256i *)&grid[i + 1][j]);
+            _mm256_store_si256((__m256i *)&grid[i + 1][j],
+                               _mm256_add_epi32(value, increment));
             if (mask & 1)
               grid[i][j - 1]++;
-            if (mask & 8)
-              grid[i][j + 4]++;
+            if (mask & 128)
+              grid[i][j + 8]++;
           }
           for (; j < last; ++j) {
             if (grid[i][j] < 4)
