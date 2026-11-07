@@ -253,8 +253,10 @@ int main(int argc, char **argv) {
   grid = (int **)malloc(N * sizeof(int *));
   row_begin = (int *)malloc(N * sizeof(int));
   row_end = (int *)malloc(N * sizeof(int));
+  size_t row_bytes = ((size_t)(N + 15) * sizeof(int) + 63) & ~(size_t)63;
   for (int i = 0; i < N; ++i) {
-    grid[i] = (int *)malloc(N * sizeof(int));
+    grid[i] = (int *)aligned_alloc(64, row_bytes);
+    memset(grid[i], 0, row_bytes);
   }
   init_row_bounds();
 
