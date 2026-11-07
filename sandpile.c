@@ -13,6 +13,7 @@
 
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#define DYNAMIC_CHUNK_ROWS 32
 
 static void die(const char *s) {
   fprintf(stderr, "%s\n", s);
@@ -80,26 +81,13 @@ static void stabilize() {
   int *shared_row = (int *)calloc(N, sizeof(int));
   int *special_row = (int *)calloc(N, sizeof(int));
   int *thread_changed = (int *)malloc(2 * threads * sizeof(int));
-  int *thread_begin = (int *)malloc((threads + 1) * sizeof(int));
-  if (!shared_row || !special_row || !thread_changed || !thread_begin)
+  if (!shared_row || !special_row || !thread_changed)
     die("malloc failed for parallel stabilization");
 
-  int64_t total_cells = 0;
-  for (int i = 0; i < N; ++i)
-    total_cells += row_end[i] - row_begin[i];
-  thread_begin[0] = 0;
-  thread_begin[threads] = N;
-  int row = 0;
-  int64_t cells = 0;
-  for (int tid = 1; tid < threads; ++tid) {
-    int64_t target = total_cells * tid / threads;
-    while (row < N && 2 * cells + row_end[row] - row_begin[row] < 2 * target) {
-      cells += row_end[row] - row_begin[row];
-      ++row;
-    }
-    thread_begin[tid] = row;
-    shared_row[row - 1] = 1;
-    shared_row[row] = 1;
+  for (int boundary = DYNAMIC_CHUNK_ROWS; boundary < N;
+       boundary += DYNAMIC_CHUNK_ROWS) {
+    shared_row[boundary - 1] = 1;
+    shared_row[boundary] = 1;
   }
   for (int i = 0; i < N; ++i) {
     if (shared_row[i]) {
@@ -114,12 +102,11 @@ static void stabilize() {
 #pragma omp parallel num_threads(threads)
   {
     int tid = omp_get_thread_num();
-    int begin = thread_begin[tid];
-    int end = thread_begin[tid + 1];
     int round = 0;
     while (1) {
       int local_changed = 0;
-      for (int i = begin; i < end; ++i) {
+#pragma omp for schedule(dynamic, DYNAMIC_CHUNK_ROWS) nowait
+      for (int i = 0; i < N; ++i) {
         if (!special_row[i]) {
           for (int j = row_begin[i]; j < row_end[i]; ++j) {
             if (grid[i][j] < 4)
@@ -203,7 +190,6 @@ static void stabilize() {
   free(shared_row);
   free(special_row);
   free(thread_changed);
-  free(thread_begin);
 }
 
 static void init_row_bounds() {
