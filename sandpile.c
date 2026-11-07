@@ -24,6 +24,10 @@ int N = 801;
 int **grid;
 int *row_begin;
 int *row_end;
+double profile_compute;
+double profile_barrier;
+double profile_parallel;
+uint64_t profile_rounds;
 
 // you can also use this function to debug print your sandpile
 static void render(char *filename) {
@@ -81,7 +85,12 @@ static void stabilize() {
   int *shared_row = (int *)calloc(N, sizeof(int));
   int *special_row = (int *)calloc(N, sizeof(int));
   int *thread_changed = (int *)malloc(2 * threads * sizeof(int));
-  if (!shared_row || !special_row || !thread_changed)
+  double *thread_compute = (double *)calloc(threads, sizeof(double));
+  double *thread_barrier = (double *)calloc(threads, sizeof(double));
+  double *thread_parallel = (double *)calloc(threads, sizeof(double));
+  uint64_t *thread_rounds = (uint64_t *)calloc(threads, sizeof(uint64_t));
+  if (!shared_row || !special_row || !thread_changed || !thread_compute ||
+      !thread_barrier || !thread_parallel || !thread_rounds)
     die("malloc failed for parallel stabilization");
 
   for (int boundary = DYNAMIC_CHUNK_ROWS; boundary < N;
@@ -103,8 +112,12 @@ static void stabilize() {
   {
     int tid = omp_get_thread_num();
     int round = 0;
+    double local_compute = 0.0;
+    double local_barrier = 0.0;
+    double parallel_start = omp_get_wtime();
     while (1) {
       int local_changed = 0;
+      double compute_start = omp_get_wtime();
 #pragma omp for schedule(dynamic, DYNAMIC_CHUNK_ROWS) nowait
       for (int i = 0; i < N; ++i) {
         if (!special_row[i]) {
@@ -175,9 +188,12 @@ static void stabilize() {
           }
         }
       }
+      local_compute += omp_get_wtime() - compute_start;
       int *changed = &thread_changed[(round & 1) * threads];
       changed[tid] = local_changed;
+      double barrier_start = omp_get_wtime();
 #pragma omp barrier
+      local_barrier += omp_get_wtime() - barrier_start;
       int keep_going = 0;
       for (int t = 0; t < threads; ++t)
         keep_going |= changed[t];
@@ -185,11 +201,26 @@ static void stabilize() {
         break;
       ++round;
     }
+    thread_compute[tid] = local_compute;
+    thread_barrier[tid] = local_barrier;
+    thread_parallel[tid] = omp_get_wtime() - parallel_start;
+    thread_rounds[tid] = (uint64_t)round + 1;
   }
+
+  for (int tid = 0; tid < threads; ++tid) {
+    profile_compute += thread_compute[tid];
+    profile_barrier += thread_barrier[tid];
+    profile_parallel += thread_parallel[tid];
+  }
+  profile_rounds += thread_rounds[0];
 
   free(shared_row);
   free(special_row);
   free(thread_changed);
+  free(thread_compute);
+  free(thread_barrier);
+  free(thread_parallel);
+  free(thread_rounds);
 }
 
 static void init_row_bounds() {
@@ -247,6 +278,16 @@ int main(int argc, char **argv) {
   init_row_bounds();
 
   find_identity();
+
+  double profile_other = profile_parallel - profile_compute - profile_barrier;
+  fprintf(stderr,
+          "PROFILE partition=dynamic rounds=%" PRIu64
+          " thread_seconds=%.6f compute=%.6f (%.2f%%) barrier=%.6f "
+          "(%.2f%%) other=%.6f (%.2f%%)\n",
+          profile_rounds, profile_parallel, profile_compute,
+          100.0 * profile_compute / profile_parallel, profile_barrier,
+          100.0 * profile_barrier / profile_parallel, profile_other,
+          100.0 * profile_other / profile_parallel);
 
   render("identity.png");
   for (int i = 0; i < N; ++i) {
