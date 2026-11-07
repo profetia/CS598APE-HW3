@@ -15,6 +15,10 @@
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 
+#ifndef DIRTY_BLOCK_ROWS
+#define DIRTY_BLOCK_ROWS 1
+#endif
+
 static void die(const char *s) {
   fprintf(stderr, "%s\n", s);
   exit(1);
@@ -117,106 +121,157 @@ static void stabilize(int symmetric) {
     }
   }
 
+  int *block_begin = (int *)malloc(active_rows * sizeof(int));
+  int *block_end = (int *)malloc(active_rows * sizeof(int));
+  int *thread_block_begin = (int *)malloc((threads + 1) * sizeof(int));
+  if (!block_begin || !block_end || !thread_block_begin)
+    die("malloc failed for dirty row blocks");
+  int blocks = 0;
+  for (int tid = 0; tid < threads; ++tid) {
+    thread_block_begin[tid] = blocks;
+    for (int i = thread_begin[tid]; i < thread_begin[tid + 1];
+         i += DIRTY_BLOCK_ROWS) {
+      block_begin[blocks] = i;
+      block_end[blocks] = MIN(i + DIRTY_BLOCK_ROWS, thread_begin[tid + 1]);
+      ++blocks;
+    }
+  }
+  thread_block_begin[threads] = blocks;
+  unsigned char *dirty_block = (unsigned char *)calloc(2 * blocks, 1);
+  if (!dirty_block)
+    die("malloc failed for dirty row blocks");
+  memset(dirty_block, 1, blocks);
+
 #pragma omp parallel num_threads(threads)
   {
     int tid = omp_get_thread_num();
-    int begin = thread_begin[tid];
-    int end = thread_begin[tid + 1];
     int round = 0;
     while (1) {
       int local_changed = 0;
-      for (int i = begin; i < end; ++i) {
-        if (!special_row[i]) {
-          int first = row_begin[i];
-          int last = row_end[i];
-          int j = first & ~15;
-          int vector_end = (last + 15) & ~15;
-          __m512i one = _mm512_set1_epi32(1);
-          __m512i down =
-              _mm512_set1_epi32(symmetric && i == active_rows - 2 ? 2 : 1);
-          __m512i three = _mm512_set1_epi32(3);
-          __m512i four = _mm512_set1_epi32(4);
-          for (; j < vector_end; j += 16) {
-            __mmask16 valid = 0xffff;
-            if (j < first)
-              valid &= (__mmask16)(0xffffu << (first - j));
-            if (j + 16 > last)
-              valid &= (__mmask16)(0xffffu >> (j + 16 - last));
-            __m512i value = _mm512_load_si512((__m512i *)&grid[i][j]);
-            __mmask16 mask = _mm512_cmpgt_epi32_mask(value, three) & valid;
-            if (!mask)
+      unsigned char *current_dirty = dirty_block + (round & 1) * blocks;
+      unsigned char *next_dirty = dirty_block + ((round + 1) & 1) * blocks;
+      for (int block = thread_block_begin[tid];
+           block < thread_block_begin[tid + 1]; ++block) {
+        if (!current_dirty[block])
+          continue;
+        current_dirty[block] = 0;
+        int block_changed = 0;
+        int first_changed = 0;
+        int last_changed = 0;
+        for (int i = block_begin[block]; i < block_end[block]; ++i) {
+          int row_changed = 0;
+          if (!special_row[i]) {
+            int first = row_begin[i];
+            int last = row_end[i];
+            int j = first & ~15;
+            int vector_end = (last + 15) & ~15;
+            __m512i one = _mm512_set1_epi32(1);
+            __m512i down =
+                _mm512_set1_epi32(symmetric && i == active_rows - 2 ? 2 : 1);
+            __m512i three = _mm512_set1_epi32(3);
+            __m512i four = _mm512_set1_epi32(4);
+            for (; j < vector_end; j += 16) {
+              __mmask16 valid = 0xffff;
+              if (j < first)
+                valid &= (__mmask16)(0xffffu << (first - j));
+              if (j + 16 > last)
+                valid &= (__mmask16)(0xffffu >> (j + 16 - last));
+              __m512i value = _mm512_load_si512((__m512i *)&grid[i][j]);
+              __mmask16 mask = _mm512_cmpgt_epi32_mask(value, three) & valid;
+              if (!mask)
+                continue;
+              local_changed = 1;
+              row_changed = 1;
+              __mmask16 from_left = (__mmask16)(mask << 1);
+              __mmask16 from_right = mask >> 1;
+              value = _mm512_mask_sub_epi32(value, mask, value, four);
+              value = _mm512_mask_add_epi32(value, from_left, value, one);
+              value = _mm512_mask_add_epi32(value, from_right, value, one);
+              _mm512_store_si512((__m512i *)&grid[i][j], value);
+              value = _mm512_load_si512((__m512i *)&grid[i - 1][j]);
+              _mm512_store_si512(
+                  (__m512i *)&grid[i - 1][j],
+                  _mm512_mask_add_epi32(value, mask, value, one));
+              value = _mm512_load_si512((__m512i *)&grid[i + 1][j]);
+              _mm512_store_si512(
+                  (__m512i *)&grid[i + 1][j],
+                  _mm512_mask_add_epi32(value, mask, value, down));
+              if (mask & 1)
+                grid[i][j - 1]++;
+              if (mask & 0x8000)
+                grid[i][j + 16]++;
+            }
+            if (row_changed) {
+              block_changed = 1;
+              first_changed |= i == block_begin[block];
+              last_changed |= i + 1 == block_end[block];
+            }
+              continue;
+          }
+          for (int j = row_begin[i]; j < row_end[i]; ++j) {
+            int grains;
+            if (shared_row[i]) {
+#pragma omp atomic read
+              grains = grid[i][j];
+            } else {
+              grains = grid[i][j];
+            }
+            if (grains < 4)
               continue;
             local_changed = 1;
-            __mmask16 from_left = (__mmask16)(mask << 1);
-            __mmask16 from_right = mask >> 1;
-            value = _mm512_mask_sub_epi32(value, mask, value, four);
-            value = _mm512_mask_add_epi32(value, from_left, value, one);
-            value = _mm512_mask_add_epi32(value, from_right, value, one);
-            _mm512_store_si512((__m512i *)&grid[i][j], value);
-            value = _mm512_load_si512((__m512i *)&grid[i - 1][j]);
-            _mm512_store_si512((__m512i *)&grid[i - 1][j],
-                               _mm512_mask_add_epi32(value, mask, value, one));
-            value = _mm512_load_si512((__m512i *)&grid[i + 1][j]);
-            _mm512_store_si512((__m512i *)&grid[i + 1][j],
-                               _mm512_mask_add_epi32(value, mask, value, down));
-            if (mask & 1)
-              grid[i][j - 1]++;
-            if (mask & 0x8000)
-              grid[i][j + 16]++;
-          }
-          continue;
-        }
-        for (int j = row_begin[i]; j < row_end[i]; ++j) {
-          int grains;
-          if (shared_row[i]) {
-#pragma omp atomic read
-            grains = grid[i][j];
-          } else {
-            grains = grid[i][j];
-          }
-          if (grains < 4)
-            continue;
-          local_changed = 1;
-          if (shared_row[i]) {
-#pragma omp atomic update
-            grid[i][j] -= 4;
-          } else {
-            grid[i][j] -= 4;
-          }
-          if (i > 0) {
-            if (shared_row[i - 1]) {
-#pragma omp atomic update
-              grid[i - 1][j]++;
-            } else {
-              grid[i - 1][j]++;
-            }
-          }
-          if (j > 0) {
+            row_changed = 1;
             if (shared_row[i]) {
 #pragma omp atomic update
-              grid[i][j - 1]++;
+              grid[i][j] -= 4;
             } else {
-              grid[i][j - 1]++;
+              grid[i][j] -= 4;
+            }
+            if (i > 0) {
+              if (shared_row[i - 1]) {
+#pragma omp atomic update
+                grid[i - 1][j]++;
+              } else {
+                grid[i - 1][j]++;
+              }
+            }
+            if (j > 0) {
+              if (shared_row[i]) {
+#pragma omp atomic update
+                grid[i][j - 1]++;
+              } else {
+                grid[i][j - 1]++;
+              }
+            }
+            if (i < active_rows - 1) {
+              int amount = symmetric && i == active_rows - 2 ? 2 : 1;
+              if (shared_row[i + 1]) {
+#pragma omp atomic update
+                grid[i + 1][j] += amount;
+              } else {
+                grid[i + 1][j] += amount;
+              }
+            }
+            if (j < N - 1) {
+              if (shared_row[i]) {
+#pragma omp atomic update
+                grid[i][j + 1]++;
+              } else {
+                grid[i][j + 1]++;
+              }
             }
           }
-          if (i < active_rows - 1) {
-            int amount = symmetric && i == active_rows - 2 ? 2 : 1;
-            if (shared_row[i + 1]) {
-#pragma omp atomic update
-              grid[i + 1][j] += amount;
-            } else {
-              grid[i + 1][j] += amount;
-            }
-          }
-          if (j < N - 1) {
-            if (shared_row[i]) {
-#pragma omp atomic update
-              grid[i][j + 1]++;
-            } else {
-              grid[i][j + 1]++;
-            }
+          if (row_changed) {
+            block_changed = 1;
+            first_changed |= i == block_begin[block];
+            last_changed |= i + 1 == block_end[block];
           }
         }
+        if (block_changed)
+          __atomic_store_n(&next_dirty[block], 1, __ATOMIC_RELAXED);
+        if (first_changed && block > 0)
+          __atomic_store_n(&next_dirty[block - 1], 1, __ATOMIC_RELAXED);
+        if (last_changed && block + 1 < blocks)
+          __atomic_store_n(&next_dirty[block + 1], 1, __ATOMIC_RELAXED);
       }
       int *changed = &thread_changed[(round & 1) * threads];
       changed[tid] = local_changed;
@@ -234,6 +289,10 @@ static void stabilize(int symmetric) {
   free(special_row);
   free(thread_changed);
   free(thread_begin);
+  free(block_begin);
+  free(block_end);
+  free(thread_block_begin);
+  free(dirty_block);
 }
 
 static void init_row_bounds() {
