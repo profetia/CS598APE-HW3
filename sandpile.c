@@ -84,12 +84,22 @@ static void stabilize() {
   if (!shared_row || !special_row || !thread_changed || !thread_begin)
     die("malloc failed for parallel stabilization");
 
-  for (int tid = 0; tid <= threads; ++tid)
-    thread_begin[tid] = (int)((int64_t)N * tid / threads);
+  int64_t total_cells = 0;
+  for (int i = 0; i < N; ++i)
+    total_cells += row_end[i] - row_begin[i];
+  thread_begin[0] = 0;
+  thread_begin[threads] = N;
+  int row = 0;
+  int64_t cells = 0;
   for (int tid = 1; tid < threads; ++tid) {
-    int boundary = thread_begin[tid];
-    shared_row[boundary - 1] = 1;
-    shared_row[boundary] = 1;
+    int64_t target = total_cells * tid / threads;
+    while (row < N && 2 * cells + row_end[row] - row_begin[row] < 2 * target) {
+      cells += row_end[row] - row_begin[row];
+      ++row;
+    }
+    thread_begin[tid] = row;
+    shared_row[row - 1] = 1;
+    shared_row[row] = 1;
   }
   for (int i = 0; i < N; ++i) {
     if (shared_row[i]) {
